@@ -4,6 +4,7 @@ const AUTO_LOCK_MS = 10 * 60 * 1000;
 const CLIPBOARD_CLEAR_MS = 30 * 1000;
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const MIN_PASSWORD = 14;
+const MAX_ENV_BYTES = 100 * 1024;
 const MAX_SHARE_FILE_BYTES = 10 * 1024 * 1024;
 const SHARE_TTLS = [[3600, '1 giờ'], [86400, '24 giờ'], [604800, '7 ngày'], [2592000, '30 ngày']];
 const SHARE_STATES = { active: 'Đang hoạt động', opened: 'Đã mở', revoked: 'Đã thu hồi', expired: 'Hết hạn' };
@@ -12,12 +13,14 @@ const TYPES = {
   login: { label: 'Tài khoản', short: 'Tài khoản', icon: 'user' },
   apikey: { label: 'API key / Token', short: 'API key', icon: 'key' },
   keyfile: { label: 'Key file / Cert', short: 'Key file', icon: 'file' },
+  env: { label: 'File .env', short: '.env', icon: 'env' },
   note: { label: 'Ghi chú bảo mật', short: 'Ghi chú', icon: 'note' },
 };
 const TYPE_FIELDS = {
   login: { username: true, secret: true, url: true },
   apikey: { username: true, secret: true, url: true, usernameLabel: 'Key ID / Client ID', secretLabel: 'Key / Token' },
   keyfile: { secret: true, secretLabel: 'Passphrase' },
+  env: { env: true },
   note: {},
 };
 const ENVS = ['', 'prod', 'staging', 'dev'];
@@ -80,6 +83,7 @@ const ICONS = {
   note: ['M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z', 'M14 2v6h6', 'M8 13h8', 'M8 17h5'],
   user: ['M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2', 'M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z'],
   users: ['M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2', 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z', 'M22 21v-2a4 4 0 0 0-3-3.9', 'M16 3.1a4 4 0 0 1 0 7.8'],
+  env: ['M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5a2 2 0 0 0 2 2h1', 'M16 3h1a2 2 0 0 1 2 2v5a2 2 0 0 0 2 2 2 2 0 0 0-2 2v5a2 2 0 0 1-2 2h-1'],
   key: ['M7.5 21a5.5 5.5 0 1 0 0-11 5.5 5.5 0 0 0 0 11z', 'm21 2-9.6 9.6', 'm15.5 7.5 3 3L22 7l-3-3'],
   trash: ['M3 6h18', 'M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2', 'M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6'],
   edit: ['M12 20h9', 'M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z'],
@@ -152,6 +156,28 @@ function formatSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+const ENV_LINE = /^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.]*\s*=)/;
+const envVarCount = (text) => text.split('\n').filter((line) => ENV_LINE.test(line)).length;
+
+// Keeps variable names readable and hides every value. Comments are hidden too,
+// since people often leave old values in them.
+function maskEnv(text) {
+  return text.split('\n').map((line) => {
+    if (!line.trim()) return '';
+    const match = line.match(ENV_LINE);
+    return match ? `${match[1]}••••••••` : '••••••••';
+  }).join('\n');
+}
+
+function saveBytes(bytes, name) {
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
+  const a = h('a', { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function safeUrl(value) {
@@ -620,6 +646,30 @@ function secretRow(entry, key, label) {
   );
 }
 
+function envSection(entry) {
+  const name = entry.envName || '.env';
+  const shown = state.revealed.has('envContent');
+  const count = envVarCount(entry.envContent);
+  return h('section', {},
+    h('div', { class: 'env-head' },
+      h('div', {},
+        h('h2', { class: 'section-title env-name' }, name),
+        h('span', { class: 'meta' }, `${count} biến`),
+      ),
+      h('div', { class: 'actions' },
+        iconButton(shown ? 'eyeOff' : 'eye', shown ? 'Ẩn giá trị' : 'Hiện giá trị', () => {
+          if (shown) state.revealed.delete('envContent');
+          else state.revealed.add('envContent');
+          renderApp();
+        }),
+        iconButton('copy', `Sao chép ${name}`, () => copyText(entry.envContent)),
+        iconButton('download', `Tải ${name}`, () => saveBytes(new TextEncoder().encode(entry.envContent), name)),
+      ),
+    ),
+    h('pre', { class: 'card env-view', tabindex: '0', 'aria-label': `Nội dung ${name}` }, shown ? entry.envContent : maskEnv(entry.envContent)),
+  );
+}
+
 function plainRow(label, value, link = false) {
   if (!value) return null;
   const href = link ? safeUrl(value) : null;
@@ -640,6 +690,12 @@ function renderDetail() {
   if (entry.env) chips.push(h('span', { class: `chip env-${entry.env}` }, entry.env.toUpperCase()));
   const files = entry.files || [];
   const editor = userName(entry.updatedBy);
+  const rows = [
+    plainRow('Username', entry.username),
+    secretRow(entry, 'secret', entry.type === 'apikey' ? 'Key / Token' : entry.type === 'keyfile' ? 'Passphrase' : 'Mật khẩu'),
+    plainRow('URL', entry.url, true),
+    secretRow(entry, 'notes', 'Ghi chú'),
+  ].filter(Boolean);
   const when = entry.serverUpdatedAt ? new Date(entry.serverUpdatedAt * 1000).toLocaleString('vi-VN') : '';
   return h('main', { id: 'main', class: 'detail', tabindex: '-1' },
     h('div', { class: 'detail-inner' },
@@ -655,12 +711,8 @@ function renderDetail() {
           h('button', { type: 'button', class: 'btn btn-danger', onclick: () => deleteEntry(entry) }, icon('trash'), 'Xoá'),
         ) : null,
       ),
-      h('dl', { class: 'card' },
-        plainRow('Username', entry.username),
-        secretRow(entry, 'secret', entry.type === 'apikey' ? 'Key / Token' : 'Mật khẩu'),
-        plainRow('URL', entry.url, true),
-        secretRow(entry, 'notes', 'Ghi chú'),
-      ),
+      entry.envContent ? envSection(entry) : null,
+      rows.length ? h('dl', { class: 'card' }, rows) : null,
       files.length ? h('section', {},
         h('h2', { class: 'section-title' }, `Tệp đính kèm (${files.length})`),
         h('ul', { class: 'card files' }, files.map((f) => h('li', { class: 'file' },
@@ -695,12 +747,7 @@ async function downloadFile(file) {
     const encrypted = await api(`/api/files/${file.id}`);
     const key = await vc.aesKey(vc.fromB64(file.key));
     const bytes = await vc.decryptBytes(key, encrypted, vc.aad.file(file.id));
-    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
-    const a = h('a', { href: url, download: file.name });
-    document.body.append(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    saveBytes(bytes, file.name);
   } catch (err) {
     toast(errorText(err), true);
   }
@@ -780,6 +827,31 @@ function entryDialog(existing) {
     }, { class: 'btn btn-icon btn-ghost gen-btn' }),
   });
   const url = field('URL', { type: 'url', value: e.url, placeholder: 'https://' });
+  const envName = field('Tên file', { value: e.envName || '.env', placeholder: '.env.production' });
+  const envContent = field('Nội dung', { multiline: true, value: e.envContent, placeholder: 'DB_HOST=10.0.0.1\nAPI_KEY=...' });
+  envContent.control.classList.add('env-input');
+  const loadEnvFile = async (file) => {
+    if (file.size > MAX_ENV_BYTES) return envContent.setError('File .env tối đa 100 KB.');
+    envContent.setError('');
+    envContent.control.value = await file.text();
+    if (!e.envName && file.name) envName.control.value = file.name;
+  };
+  const envPicker = h('input', { type: 'file', hidden: true, onchange: (ev) => { if (ev.target.files[0]) loadEnvFile(ev.target.files[0]); ev.target.value = ''; } });
+  envContent.control.addEventListener('dragover', (ev) => ev.preventDefault());
+  envContent.control.addEventListener('drop', (ev) => {
+    if (!ev.dataTransfer.files[0]) return;
+    ev.preventDefault();
+    loadEnvFile(ev.dataTransfer.files[0]);
+  });
+  const envBlock = h('div', { class: 'stack' },
+    envName,
+    envContent,
+    h('div', { class: 'actions' },
+      h('button', { type: 'button', class: 'btn', onclick: () => envPicker.click() }, icon('upload'), 'Nhập từ file'),
+      h('span', { class: 'helper' }, 'Hoặc dán nội dung, hoặc kéo file vào ô trên.'),
+    ),
+    envPicker,
+  );
   const notes = field('Ghi chú', { multiline: true, value: e.notes, placeholder: 'Có thể dán nội dung .env, private key dạng text…' });
 
   const fileList = h('ul', { class: 'files' });
@@ -826,6 +898,8 @@ function entryDialog(existing) {
     username.querySelector('label').firstChild.textContent = layout.usernameLabel || 'Username';
     secret.querySelector('label').firstChild.textContent = layout.secretLabel || 'Mật khẩu';
     secret.classList.toggle('field-wide', url.hidden && username.hidden);
+    envBlock.hidden = !layout.env && !envContent.control.value;
+    filesField.hidden = !!layout.env && !keptFiles.length && !newFiles.length;
   }
 
   const saveBtn = h('button', { type: 'submit', class: 'btn btn-primary', 'data-label': 'Lưu' }, 'Lưu');
@@ -843,6 +917,7 @@ function entryDialog(existing) {
       h('div', { class: 'grid-2' }, project, env),
       h('div', { class: 'grid-2' }, category, service),
       credentials,
+      envBlock,
       filesField,
       notes,
       datalist('dl-category', 'category'), datalist('dl-service', 'service'),
@@ -858,6 +933,9 @@ function entryDialog(existing) {
     ev.preventDefault();
     title.setError('');
     if (!title.control.value.trim()) return title.setError('Nhập tên cho mục này.'), title.control.focus();
+    envContent.setError('');
+    if (currentType() === 'env' && !envContent.control.value.trim()) return envContent.setError('Dán nội dung file .env.'), envContent.control.focus();
+    if (new Blob([envContent.control.value]).size > MAX_ENV_BYTES) return envContent.setError('File .env tối đa 100 KB.'), envContent.control.focus();
     const target = state.projects.get(project.control.value);
     busy(saveBtn, true, 'Đang mã hoá…');
     const id = existing?.id || vc.randomId();
@@ -875,6 +953,7 @@ function entryDialog(existing) {
         category: category.control.value.trim(), service: service.control.value.trim(),
         env: env.control.value, username: username.control.value.trim(), secret: secret.control.value,
         url: url.control.value.trim(), notes: notes.control.value,
+        envName: envContent.control.value ? envName.control.value.trim() || '.env' : '', envContent: envContent.control.value,
         files: [...keptFiles, ...uploaded],
       };
       const ciphertext = await vc.encryptJson(target.key, entry, vc.aad.entry(target.id, id));
@@ -1334,6 +1413,7 @@ function shareDialog(entry) {
     ['username', 'Username', false],
     ['secret', entry.type === 'apikey' ? 'Key / Token' : 'Mật khẩu', true],
     ['url', 'URL', false],
+    ['envContent', entry.envName || '.env', true],
     ['notes', 'Ghi chú', true],
   ].filter(([key]) => entry[key]).map(([key, label, secret]) => ({
     key, label, secret, box: h('input', { type: 'checkbox', id: `share-${key}`, checked: true }),
@@ -1369,7 +1449,7 @@ function shareDialog(entry) {
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     const fields = fieldChoices.filter((c) => c.box.checked)
-      .map((c) => ({ label: c.label, value: entry[c.key], secret: c.secret }));
+      .map((c) => ({ label: c.label, value: entry[c.key], secret: c.secret, download: c.key === 'envContent' ? c.label : undefined }));
     const files = fileChoices.filter((c) => c.box.checked).map((c) => c.file);
     if (!fields.length && !files.length) return toast('Chọn ít nhất một nội dung.', true);
     if (files.reduce((sum, f) => sum + f.size, 0) > MAX_SHARE_FILE_BYTES) return toast('Tổng tệp vượt quá 10 MB.', true);
@@ -1476,18 +1556,12 @@ function shareField(f) {
         value.textContent = shown ? f.value : '••••••••••••';
       }) : null,
       iconButton('copy', `Sao chép ${f.label}`, () => copyText(f.value)),
+      f.download ? iconButton('download', `Tải ${f.label}`, () => saveBytes(new TextEncoder().encode(f.value), f.download)) : null,
     ),
   );
 }
 
-function saveSharedFile(file) {
-  const url = URL.createObjectURL(new Blob([vc.fromB64(file.data)], { type: 'application/octet-stream' }));
-  const a = h('a', { href: url, download: file.name });
-  document.body.append(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
+const saveSharedFile = (file) => saveBytes(vc.fromB64(file.data), file.name);
 
 function shareContentScreen(content, mode) {
   mount(h('main', { id: 'main', class: 'auth' },

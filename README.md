@@ -33,6 +33,10 @@ npm test                   # test mã hoá
 SECRET=$(cut -d= -f2 .dev.vars) node --test test/api.e2e.mjs   # test phân quyền, cần server chạy với DB trống
 ```
 
+## Loại mục
+
+Tài khoản, API key, Key file, File .env, Ghi chú. File .env dán, kéo thả hoặc nhập từ file (tối đa 100 KB), mã hoá như mọi mục, mặc định chỉ hiện tên biến, tải lại được đúng tên file.
+
 ## Vai trò
 
 | Vai trò | Quyền |

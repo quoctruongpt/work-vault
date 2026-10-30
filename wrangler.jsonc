@@ -7,7 +7,7 @@
     {
       "binding": "DB",
       "database_name": "work-vault",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "ca5927f6-a213-4c8b-bbab-4214257358fc",
       "migrations_dir": "migrations"
     }
   ],

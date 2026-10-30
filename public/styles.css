@@ -248,3 +248,26 @@ dialog { width: min(680px, calc(100vw - 32px)); }
 .choices { border: 0; margin: 0; padding: 0; display: grid; gap: 8px; }
 .share-card { max-width: 560px; }
 .share-card .kv { grid-template-columns: 110px 1fr auto; }
+
+/* Entry form */
+.field { align-content: start; }
+.field label, .form-label { font-size: 13px; font-weight: 600; color: var(--text-muted); padding: 0; }
+.entry-form { gap: 16px; }
+.entry-form textarea.input { min-height: 88px; }
+.field-wide { grid-column: 1 / -1; }
+.segments { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; padding: 4px; background: var(--surface-2); border-radius: 10px; }
+.segment { cursor: pointer; }
+.segment input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.segment-face { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 8px; border-radius: 7px; font-size: 13px; color: var(--text-muted); transition: background var(--dur), color var(--dur); }
+.segment-face .icon { width: 16px; height: 16px; }
+.segment:hover .segment-face { color: var(--text); }
+.segment input:checked + .segment-face { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.18); }
+.segment input:focus-visible + .segment-face { outline: 2px solid var(--ring); outline-offset: 1px; }
+.drop { padding: 0; border-radius: 10px; gap: 0; }
+.drop-target { width: 100%; display: grid; justify-items: center; gap: 4px; padding: 16px; border: 0; background: none; border-radius: 10px; cursor: pointer; color: var(--text-muted); transition: background var(--dur); }
+.drop-target:hover { background: var(--surface-2); }
+.drop-target strong { color: var(--accent); }
+.drop .files .file { padding: 8px 12px; border-top: 1px solid var(--border); border-bottom: 0; }
+@media (max-width: 860px) {
+  .segments { grid-template-columns: repeat(2, 1fr); }
+}

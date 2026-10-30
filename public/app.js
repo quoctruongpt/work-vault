@@ -9,10 +9,16 @@ const SHARE_TTLS = [[3600, '1 giờ'], [86400, '24 giờ'], [604800, '7 ngày'],
 const SHARE_STATES = { active: 'Đang hoạt động', opened: 'Đã mở', revoked: 'Đã thu hồi', expired: 'Hết hạn' };
 
 const TYPES = {
-  login: { label: 'Tài khoản', icon: 'user' },
-  apikey: { label: 'API key / Token', icon: 'key' },
-  keyfile: { label: 'Key file / Cert', icon: 'file' },
-  note: { label: 'Ghi chú bảo mật', icon: 'note' },
+  login: { label: 'Tài khoản', short: 'Tài khoản', icon: 'user' },
+  apikey: { label: 'API key / Token', short: 'API key', icon: 'key' },
+  keyfile: { label: 'Key file / Cert', short: 'Key file', icon: 'file' },
+  note: { label: 'Ghi chú bảo mật', short: 'Ghi chú', icon: 'note' },
+};
+const TYPE_FIELDS = {
+  login: { username: true, secret: true, url: true },
+  apikey: { username: true, secret: true, url: true, usernameLabel: 'Key ID / Client ID', secretLabel: 'Key / Token' },
+  keyfile: { secret: true, secretLabel: 'Passphrase' },
+  note: {},
 };
 const ENVS = ['', 'prod', 'staging', 'dev'];
 const ROLES = [['viewer', 'Chỉ xem'], ['editor', 'Chỉnh sửa'], ['manager', 'Quản lý']];
@@ -186,13 +192,13 @@ function field(label, opts = {}) {
   const helpId = opts.helper ? `${id}-help` : null;
   const errId = `${id}-err`;
   const control = opts.multiline
-    ? h('textarea', { id, class: 'input', name: opts.name, 'aria-describedby': helpId, spellcheck: 'false', value: opts.value || '' })
+    ? h('textarea', { id, class: 'input', name: opts.name, placeholder: opts.placeholder, 'aria-describedby': helpId, spellcheck: 'false', value: opts.value || '' })
     : opts.options
       ? h('select', { id, class: 'input', name: opts.name, disabled: opts.disabled },
           opts.options.map(([v, text]) => h('option', { value: v, selected: v === (opts.value || '') }, text)))
       : h('input', {
           id, class: 'input', name: opts.name, type: opts.type || 'text', value: opts.value || '',
-          autocomplete: opts.autocomplete || 'off', required: opts.required, list: opts.list,
+          autocomplete: opts.autocomplete || 'off', required: opts.required, list: opts.list, placeholder: opts.placeholder,
           spellcheck: 'false', autocapitalize: 'off', 'aria-describedby': [helpId, errId].filter(Boolean).join(' '),
         });
   const wrap = h('div', { class: 'input-wrap' }, control);
@@ -752,26 +758,29 @@ function entryDialog(existing) {
   const removedFiles = [];
   const newFiles = [];
 
-  const title = field('Tên', { required: true, value: e.title });
-  const type = field('Loại', { value: e.type, options: Object.entries(TYPES).map(([k, t]) => [k, t.label]) });
+  const title = field('Tên', { required: true, value: e.title, placeholder: 'VD: Google Play service account' });
+  const typeRadios = Object.entries(TYPES).map(([key, t]) => {
+    const input = h('input', { type: 'radio', name: 'entry-type', value: key, id: `type-${key}`, checked: key === e.type, onchange: applyType });
+    return h('label', { class: 'segment', for: input.id }, input, h('span', { class: 'segment-face' }, icon(t.icon), t.short));
+  });
+  const currentType = () => typeRadios.map((l) => l.querySelector('input')).find((i) => i.checked).value;
   const project = field('Dự án', {
     required: true, value: e.projectId, disabled: !!existing,
     options: (existing ? [state.projects.get(e.projectId)] : editable).map((p) => [p.id, p.name]),
-    helper: existing ? 'Không chuyển được mục sang dự án khác.' : null,
   });
-  const category = field('Danh mục', { value: e.category, list: 'dl-category' });
-  const service = field('Service', { value: e.service, list: 'dl-service', helper: 'VD: AWS, Firebase, GitLab, MySQL' });
-  const env = field('Môi trường', { value: e.env, options: ENVS.map((v) => [v, v ? v.toUpperCase() : '—']) });
-  const username = field('Username / Email / Key ID', { value: e.username });
-  const secret = field('Mật khẩu / Secret', {
+  const env = field('Môi trường', { value: e.env, options: ENVS.map((v) => [v, v ? v.toUpperCase() : 'Không chọn']) });
+  const category = field('Danh mục', { value: e.category, list: 'dl-category', placeholder: 'VD: Cloud, Database' });
+  const service = field('Service', { value: e.service, list: 'dl-service', placeholder: 'VD: AWS, Firebase, MySQL' });
+  const username = field('Username', { value: e.username });
+  const secret = field('Mật khẩu', {
     type: 'password', value: e.secret, autocomplete: 'new-password',
     extraButton: (control) => iconButton('refresh', 'Tạo mật khẩu ngẫu nhiên', () => {
       control.value = vc.generatePassword(24);
       control.type = 'text';
     }, { class: 'btn btn-icon btn-ghost gen-btn' }),
   });
-  const url = field('URL', { type: 'url', value: e.url });
-  const notes = field('Ghi chú (mã hoá)', { multiline: true, value: e.notes, helper: 'Có thể dán nội dung .env, private key dạng text…' });
+  const url = field('URL', { type: 'url', value: e.url, placeholder: 'https://' });
+  const notes = field('Ghi chú', { multiline: true, value: e.notes, placeholder: 'Có thể dán nội dung .env, private key dạng text…' });
 
   const fileList = h('ul', { class: 'files' });
   const renderFiles = () => fileList.replaceChildren(
@@ -789,9 +798,10 @@ function entryDialog(existing) {
   };
   const picker = h('input', { type: 'file', multiple: true, hidden: true, onchange: (ev) => { addFiles(ev.target.files); ev.target.value = ''; } });
   const drop = h('div', { class: 'drop' },
-    h('div', { class: 'actions' },
-      h('button', { type: 'button', class: 'btn', onclick: () => picker.click() }, icon('upload'), 'Chọn tệp'),
-      h('span', { class: 'helper' }, 'hoặc kéo thả vào đây. Tối đa 25 MB/tệp, mã hoá trước khi tải lên.'),
+    h('button', { type: 'button', class: 'drop-target', onclick: () => picker.click() },
+      icon('upload'),
+      h('span', {}, h('strong', {}, 'Chọn tệp'), ' hoặc kéo thả vào đây'),
+      h('span', { class: 'helper' }, 'Tối đa 25 MB/tệp'),
     ),
     picker,
     fileList,
@@ -801,18 +811,40 @@ function entryDialog(existing) {
   drop.addEventListener('drop', (ev) => { ev.preventDefault(); drop.classList.remove('over'); addFiles(ev.dataTransfer.files); });
   renderFiles();
 
+  url.classList.add('field-wide');
+  const credentials = h('div', { class: 'grid-2' }, username, secret, url);
+  const filesField = h('div', { class: 'field' }, h('span', { class: 'form-label' }, 'Tệp đính kèm'), drop);
+
+  // Only the fields that fit the type are shown. A hidden field that already
+  // holds a value stays visible, so switching type never hides saved data.
+  function applyType() {
+    const layout = TYPE_FIELDS[currentType()];
+    username.hidden = !layout.username && !username.control.value;
+    secret.hidden = !layout.secret && !secret.control.value;
+    url.hidden = !layout.url && !url.control.value;
+    credentials.hidden = username.hidden && secret.hidden && url.hidden;
+    username.querySelector('label').firstChild.textContent = layout.usernameLabel || 'Username';
+    secret.querySelector('label').firstChild.textContent = layout.secretLabel || 'Mật khẩu';
+    secret.classList.toggle('field-wide', url.hidden && username.hidden);
+  }
+
   const saveBtn = h('button', { type: 'submit', class: 'btn btn-primary', 'data-label': 'Lưu' }, 'Lưu');
   const form = h('form', { novalidate: true },
     h('div', { class: 'dialog-head' },
       h('h2', { id: 'entry-title' }, existing ? 'Sửa mục' : 'Thêm mục'),
       iconButton('x', 'Đóng', () => dialog.close()),
     ),
-    h('div', { class: 'dialog-body' },
-      h('div', { class: 'grid-2' }, title, type),
-      h('div', { class: 'grid-3' }, project, category, service),
-      h('div', { class: 'grid-2' }, env, username),
-      secret, url, notes,
-      h('div', { class: 'field' }, h('span', { class: 'section-title' }, 'Tệp đính kèm (key file, cert, .p12, .pem…)'), drop),
+    h('div', { class: 'dialog-body entry-form' },
+      title,
+      h('fieldset', { class: 'choices' },
+        h('legend', { class: 'form-label' }, 'Loại'),
+        h('div', { class: 'segments' }, typeRadios),
+      ),
+      h('div', { class: 'grid-2' }, project, env),
+      h('div', { class: 'grid-2' }, category, service),
+      credentials,
+      filesField,
+      notes,
       datalist('dl-category', 'category'), datalist('dl-service', 'service'),
     ),
     h('div', { class: 'dialog-foot' },
@@ -839,7 +871,7 @@ function entryDialog(existing) {
         uploaded.push({ id: fileId, name: f.name, size: f.size, key: vc.toB64(rawKey) });
       }
       const entry = {
-        title: title.control.value.trim(), type: type.control.value,
+        title: title.control.value.trim(), type: currentType(),
         category: category.control.value.trim(), service: service.control.value.trim(),
         env: env.control.value, username: username.control.value.trim(), secret: secret.control.value,
         url: url.control.value.trim(), notes: notes.control.value,
@@ -863,6 +895,7 @@ function entryDialog(existing) {
     }
   });
 
+  applyType();
   openDialog(dialog);
   title.control.focus();
 }

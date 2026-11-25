@@ -68,6 +68,9 @@ const state = {
   query: '',
   selectedId: null,
   revealed: new Set(),
+  pins: new Set(),
+  envFilter: '',
+  serviceOpen: false,
 };
 
 /* ---------- DOM helpers (textContent only, never innerHTML with data) ---------- */
@@ -100,6 +103,7 @@ const ICONS = {
   list: ['M8 6h13', 'M8 12h13', 'M8 18h13', 'M3 6h.01', 'M3 12h.01', 'M3 18h.01'],
   alert: ['M12 3 2 21h20z', 'M12 10v5', 'M12 18h.01'],
   share: ['M18 8a3 3 0 1 0-2.8-4L8.8 9.2a3 3 0 1 0 0 5.6l6.4 5.2a3 3 0 1 0 1-1.6l-6.4-5.2a3 3 0 0 0 0-2.4l6.4-5.2A3 3 0 0 0 18 8z'],
+  star: ['M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z'],
   link: ['M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7', 'M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7'],
   settings: ['M4 21v-7', 'M4 10V3', 'M12 21v-9', 'M12 8V3', 'M20 21v-5', 'M20 12V3', 'M1 14h6', 'M9 8h6', 'M17 16h6'],
 };
@@ -491,16 +495,78 @@ function facetValues(key) {
   return [...counts].sort(([a], [b]) => (a === NONE) - (b === NONE) || compareVi(a, b));
 }
 
-function visibleEntries() {
+/* ---------- Pins (entry ids only, kept in this browser) ---------- */
+
+const pinStoreKey = () => `wv-pins:${state.user.id}`;
+
+function loadPins() {
+  try {
+    state.pins = new Set(JSON.parse(localStorage.getItem(pinStoreKey()) || '[]'));
+  } catch {
+    state.pins = new Set();
+  }
+}
+
+function togglePin(id) {
+  if (state.pins.has(id)) state.pins.delete(id);
+  else state.pins.add(id);
+  try {
+    localStorage.setItem(pinStoreKey(), JSON.stringify([...state.pins]));
+  } catch { /* storage blocked: pins last until reload */ }
+  renderApp();
+}
+
+/* ---------- Filtering ---------- */
+
+const isUnnamed = (e) => !e.corrupt && (!(e.title || '').trim() || /^chưa rõ/i.test(e.title.trim()));
+const needsCleanup = (e) => !e.corrupt && (isUnnamed(e) || !(e.service || '').trim());
+
+function visibleEntries({ ignoreEnv = false } = {}) {
   const q = state.query.trim().toLowerCase();
   const { kind, value } = state.filter;
   return state.entries.filter((e) => {
     if (kind === 'project' && e.projectId !== value) return false;
     if ((kind === 'category' || kind === 'service') && ((e[kind] || '').trim() || NONE) !== value) return false;
+    if (kind === 'pinned' && !state.pins.has(e.id)) return false;
+    if (kind === 'cleanup' && !needsCleanup(e)) return false;
+    if (!ignoreEnv && state.envFilter && e.env !== state.envFilter) return false;
     if (!q) return true;
     return [e.title, projectName(e.projectId), e.category, e.service, e.username, e.url, e.env]
       .some((v) => (v || '').toLowerCase().includes(q));
   });
+}
+
+function filterLabel() {
+  const { kind, value } = state.filter;
+  if (kind === 'pinned') return 'Đã ghim';
+  if (kind === 'cleanup') return 'Cần dọn dẹp';
+  if (kind === 'project') return projectName(value) || 'Dự án';
+  if (kind === 'category' || kind === 'service') return value === NONE ? 'Chưa phân loại' : value;
+  return 'Tất cả';
+}
+
+// The one thing people most often want from an entry, reachable without opening it.
+function quickAction(e) {
+  if (e.corrupt) return null;
+  const files = e.files || [];
+  const fileAction = files.length === 1
+    ? { label: 'Tải tệp', icon: 'download', run: () => downloadFile(files[0]) }
+    : { label: `${files.length} tệp`, icon: 'file', run: () => selectEntry(e.id) };
+  if (e.envContent) return { label: 'Sao chép .env', icon: 'copy', run: () => copyText(e.envContent) };
+  if (e.type === 'keyfile' && files.length) return fileAction;
+  if (e.secret) {
+    const what = e.type === 'apikey' ? 'key' : e.type === 'keyfile' ? 'passphrase' : 'mật khẩu';
+    return { label: `Sao chép ${what}`, icon: 'copy', run: () => copyText(e.secret) };
+  }
+  if (files.length) return fileAction;
+  if (e.notes) return { label: 'Sao chép ghi chú', icon: 'copy', run: () => copyText(e.notes) };
+  return null;
+}
+
+function monogram(e) {
+  if (e.type === 'env') return '{}';
+  const chars = (e.service || e.title || '').match(/[\p{L}\p{N}]/gu) || ['?'];
+  return chars[0].toUpperCase() + (chars[1] || '').toLowerCase();
 }
 
 /* ---------- Main app ---------- */
@@ -511,14 +577,23 @@ async function enterApp() {
   } catch (err) {
     return toast(errorText(err), true);
   }
+  loadPins();
   startAutoLock();
   renderApp();
 }
 
+function selectEntry(id) {
+  state.selectedId = id;
+  state.revealed.clear();
+  renderApp();
+}
+
 function renderApp() {
+  const scrollTop = document.querySelector('.main-scroll')?.scrollTop || 0;
   const shell = h('div', { class: 'shell' + (state.selectedId ? ' has-detail' : '') });
-  shell.append(renderSidebar(shell), renderList(shell), renderDetail());
+  shell.append(...[renderSidebar(shell), renderMain(shell), renderDetail()].filter(Boolean));
   mount(shell);
+  shell.querySelector('.main-scroll').scrollTop = scrollTop;
 }
 
 function renderSidebar(shell) {
@@ -530,18 +605,27 @@ function renderSidebar(shell) {
     },
       h('span', {}, label),
       flag ? h('span', { class: 'flag', title: 'Cần xoay khoá' }, icon('alert'), h('span', { class: 'visually-hidden' }, 'Cần xoay khoá')) : null,
-      h('span', { class: 'count' }, count));
+      h('span', { class: 'count' + (kind === 'cleanup' ? ' count-warn' : '') }, count));
   };
   const projects = sortedProjects();
   const countFor = (id) => state.entries.filter((e) => e.projectId === id).length;
+  const pinnedCount = state.entries.filter((e) => state.pins.has(e.id)).length;
+  const cleanupCount = state.entries.filter(needsCleanup).length;
   const facets = FACETS.map((g) => {
     const values = facetValues(g.key);
     if (!values.length) return null;
+    const items = values.map(([v, n]) => navItem(v === NONE ? 'Chưa phân loại' : v, n, g.key, v));
+    // Services grow into the longest list, so they stay folded until wanted.
+    if (g.key === 'service') {
+      return h('details', {
+        class: 'nav-group', open: state.serviceOpen || state.filter.kind === 'service',
+        ontoggle: (ev) => { state.serviceOpen = ev.target.open; },
+      }, h('summary', { class: 'nav-title' }, icon(g.icon), g.title, h('span', { class: 'count' }, values.length)), items);
+    }
     return h('div', { class: 'nav-group', role: 'group', 'aria-label': g.title },
-      h('div', { class: 'nav-title' }, icon(g.icon), g.title),
-      values.map(([v, n]) => navItem(v === NONE ? 'Chưa phân loại' : v, n, g.key, v)),
-    );
+      h('div', { class: 'nav-title' }, icon(g.icon), g.title), items);
   });
+  const canShare = state.user.isAdmin || projects.some(canEdit);
   return h('aside', { class: 'sidebar', 'aria-label': 'Bộ lọc' },
     h('div', { class: 'sidebar-head' },
       h('div', { class: 'brand' }, icon('shield'), 'Work Vault'),
@@ -549,6 +633,8 @@ function renderSidebar(shell) {
     ),
     h('nav', { class: 'sidebar-nav' },
       navItem('Tất cả', state.entries.length, 'all', null),
+      pinnedCount ? navItem('Đã ghim', pinnedCount, 'pinned', null) : null,
+      cleanupCount ? navItem('Cần dọn dẹp', cleanupCount, 'cleanup', null) : null,
       h('div', { class: 'nav-group', role: 'group', 'aria-label': 'Dự án' },
         h('div', { class: 'nav-title nav-title-action' },
           h('span', { class: 'nav-title-text' }, icon('folder'), 'Dự án'),
@@ -559,73 +645,177 @@ function renderSidebar(shell) {
       facets,
     ),
     h('div', { class: 'sidebar-foot' },
-      state.user.isAdmin || sortedProjects().some(canEdit)
-        ? h('button', { type: 'button', class: 'btn btn-ghost', onclick: sharesDialog }, icon('link'), 'Link chia sẻ') : null,
-      state.user.isAdmin ? h('button', { type: 'button', class: 'btn btn-ghost', onclick: () => usersDialog() }, icon('users'), 'Người dùng') : null,
-      state.user.isAdmin ? h('button', { type: 'button', class: 'btn btn-ghost', onclick: auditDialog }, icon('list'), 'Nhật ký') : null,
-      h('button', { type: 'button', class: 'btn btn-ghost', onclick: profileDialog }, icon('user'), state.user.name),
-      h('button', { type: 'button', class: 'btn btn-ghost', onclick: () => lock() }, icon('lock'), 'Khoá ngay'),
+      h('button', { type: 'button', class: 'btn btn-ghost foot-user', onclick: profileDialog }, icon('user'), h('span', {}, state.user.name)),
+      h('div', { class: 'foot-icons' },
+        canShare ? iconButton('link', 'Link chia sẻ', sharesDialog) : null,
+        state.user.isAdmin ? iconButton('users', 'Người dùng', () => usersDialog()) : null,
+        state.user.isAdmin ? iconButton('list', 'Nhật ký', auditDialog) : null,
+        iconButton('lock', 'Khoá ngay', () => lock()),
+      ),
     ),
   );
 }
 
-function renderList(shell) {
+function renderMain(shell) {
   const project = state.filter.kind === 'project' ? state.projects.get(state.filter.value) : null;
   const search = h('input', {
-    class: 'input', type: 'search', placeholder: 'Tìm theo tên, dự án, service…', 'aria-label': 'Tìm kiếm', value: state.query,
+    class: 'input search-input', type: 'search', placeholder: 'Tìm tên, service, env… Enter để sao chép', 'aria-label': 'Tìm kiếm', value: state.query,
     oninput: (e) => {
       state.query = e.target.value;
-      shell.querySelector('.list').replaceWith(renderRows(visibleEntries()));
+      shell.querySelector('.content').replaceWith(renderContent());
+    },
+    onkeydown: (ev) => {
+      // isComposing: Enter that only commits a Telex/IME word must not copy anything.
+      if (ev.key !== 'Enter' || ev.isComposing) return;
+      const first = visibleEntries()[0];
+      const action = first && quickAction(first);
+      if (action) action.run();
+      else if (first) selectEntry(first.id);
     },
   });
   const canAdd = sortedProjects().some(canEdit);
-  return h('section', { class: 'list-pane', 'aria-label': 'Danh sách mục' },
-    h('div', { class: 'list-head' },
+  return h('main', { id: 'main', class: 'main', tabindex: '-1' },
+    h('div', { class: 'main-head' },
       h('span', { class: 'mobile-only' }, iconButton('menu', 'Mở bộ lọc', () => shell.classList.add('nav-open'))),
-      h('div', { class: 'search' }, icon('search'), search),
-      iconButton('plus', 'Thêm mục mới', () => entryDialog(), { class: 'btn btn-icon btn-primary', disabled: !canAdd }),
+      h('div', { class: 'search' }, icon('search'), search, h('kbd', { 'aria-hidden': 'true' }, '/')),
+      h('button', { type: 'button', class: 'btn btn-primary btn-add', 'aria-label': 'Thêm mục mới', disabled: !canAdd, onclick: () => entryDialog() },
+        icon('plus'), h('span', { class: 'btn-add-text' }, 'Thêm mục'), h('kbd', { 'aria-hidden': 'true' }, 'N')),
     ),
-    project ? h('div', { class: 'project-bar' },
-      h('div', { class: 'project-bar-text' },
-        h('strong', {}, project.name),
-        h('span', { class: 'meta' }, ROLE_LABEL[project.role]),
-      ),
-      h('button', { type: 'button', class: 'btn', onclick: () => projectDialog(project) }, icon('settings'), 'Thành viên'),
-    ) : null,
-    project?.needsRotation && isManager(project) ? h('div', { class: 'warn-bar', role: 'alert' },
-      icon('alert'),
-      h('span', {}, 'Có người vừa mất quyền. Hãy xoay khoá dự án.'),
-      h('button', { type: 'button', class: 'btn', onclick: () => runRotate(project) }, 'Xoay khoá'),
-    ) : null,
-    renderRows(visibleEntries()),
+    h('div', { class: 'main-scroll' },
+      project ? h('div', { class: 'project-bar' },
+        h('div', { class: 'project-bar-text' },
+          h('strong', {}, project.name),
+          h('span', { class: 'meta' }, ROLE_LABEL[project.role]),
+        ),
+        h('button', { type: 'button', class: 'btn', onclick: () => projectDialog(project) }, icon('settings'), 'Thành viên'),
+      ) : null,
+      project?.needsRotation && isManager(project) ? h('div', { class: 'warn-bar', role: 'alert' },
+        icon('alert'),
+        h('span', {}, 'Có người vừa mất quyền. Hãy xoay khoá dự án.'),
+        h('button', { type: 'button', class: 'btn', onclick: () => runRotate(project) }, 'Xoay khoá'),
+      ) : null,
+      renderContent(),
+    ),
   );
 }
 
-function renderRows(items) {
-  if (!items.length) {
-    const noProjects = !state.projects.size;
-    return h('div', { class: 'list empty' },
-      noProjects ? 'Bạn chưa thuộc dự án nào. Tạo dự án mới hoặc nhờ người quản lý cấp quyền.'
-        : state.entries.length ? 'Không có mục khớp bộ lọc.' : 'Chưa có mục nào.',
-      noProjects
-        ? h('button', { type: 'button', class: 'btn btn-primary', onclick: createProjectDialog }, icon('plus'), 'Tạo dự án')
-        : !state.entries.length && sortedProjects().some(canEdit)
-          ? h('button', { type: 'button', class: 'btn btn-primary', onclick: () => entryDialog() }, icon('plus'), 'Thêm mục đầu tiên')
-          : null,
-    );
-  }
-  return h('ul', { class: 'list' }, items.map((e) => h('li', {},
-    h('button', {
-      type: 'button', class: 'row', 'aria-current': e.id === state.selectedId ? 'true' : 'false',
-      onclick: () => { state.selectedId = e.id; state.revealed.clear(); renderApp(); },
-    },
-      h('span', { class: 'row-icon' }, icon(TYPES[e.type]?.icon || 'note')),
-      h('span', { class: 'row-text' },
-        h('div', { class: 'row-title' }, e.title || '(không tên)'),
-        h('div', { class: 'row-sub' }, [projectName(e.projectId), e.service, e.env].filter(Boolean).join(' · ')),
+const envChip = (env) => (env ? h('span', { class: `chip env-${env}` }, env.toUpperCase()) : null);
+
+function actionButton(action, cls = 'btn') {
+  if (!action) return null;
+  return h('button', { type: 'button', class: cls, onclick: action.run }, icon(action.icon), action.label);
+}
+
+function pinButton(e) {
+  const on = state.pins.has(e.id);
+  return h('button', {
+    type: 'button', class: 'btn btn-icon btn-ghost pin-btn' + (on ? ' is-on' : ''), 'aria-pressed': on ? 'true' : 'false',
+    'aria-label': on ? `Bỏ ghim ${e.title}` : `Ghim ${e.title}`, title: on ? 'Bỏ ghim' : 'Ghim lên đầu', onclick: () => togglePin(e.id),
+  }, icon('star'));
+}
+
+function renderPinCard(e) {
+  return h('li', { class: 'pin-card' },
+    h('div', { class: 'pin-card-head' },
+      h('span', { class: 'mono-tile', 'aria-hidden': 'true' }, monogram(e)),
+      h('div', { class: 'row-main' },
+        h('button', { type: 'button', class: 'row-title', onclick: () => selectEntry(e.id) }, e.title || '(không tên)'),
+        h('div', { class: 'row-sub' }, [e.service || TYPES[e.type]?.short, envChip(e.env)].filter(Boolean)),
       ),
     ),
-  )));
+    actionButton(quickAction(e), 'btn btn-block') || h('button', { type: 'button', class: 'btn btn-block', onclick: () => selectEntry(e.id) }, 'Mở'),
+  );
+}
+
+function renderRow(e) {
+  const project = state.projects.get(e.projectId);
+  const unnamed = isUnnamed(e);
+  return h('li', { class: 'row' + (e.id === state.selectedId ? ' is-current' : '') },
+    h('span', { class: 'mono-tile', 'aria-hidden': 'true' }, monogram(e)),
+    h('div', { class: 'row-main' },
+      h('div', { class: 'row-title-line' },
+        h('button', {
+          type: 'button', class: 'row-title' + (unnamed ? ' is-unnamed' : ''), 'aria-current': e.id === state.selectedId ? 'true' : 'false',
+          onclick: () => selectEntry(e.id),
+        }, e.title || '(không tên)'),
+        unnamed && canEdit(project) ? h('button', { type: 'button', class: 'nudge', onclick: () => entryDialog(e) }, 'Đặt tên') : null,
+      ),
+      h('div', { class: 'row-sub' }, [state.projects.size > 1 ? project?.name : null, TYPES[e.type]?.short].filter(Boolean).join(' · ')),
+    ),
+    envChip(e.env),
+    h('div', { class: 'row-actions' }, actionButton(quickAction(e)), pinButton(e)),
+  );
+}
+
+function renderEmpty() {
+  const noProjects = !state.projects.size;
+  return h('div', { class: 'empty' },
+    noProjects ? 'Bạn chưa thuộc dự án nào. Tạo dự án mới hoặc nhờ người quản lý cấp quyền.'
+      : state.entries.length ? 'Không có mục khớp bộ lọc.' : 'Chưa có mục nào.',
+    noProjects
+      ? h('button', { type: 'button', class: 'btn btn-primary', onclick: createProjectDialog }, icon('plus'), 'Tạo dự án')
+      : !state.entries.length && sortedProjects().some(canEdit)
+        ? h('button', { type: 'button', class: 'btn btn-primary', onclick: () => entryDialog() }, icon('plus'), 'Thêm mục đầu tiên')
+        : null,
+  );
+}
+
+function renderContent() {
+  const items = visibleEntries();
+  const browsing = !state.query.trim();
+  const { kind } = state.filter;
+  const parts = [];
+
+  const pinned = browsing && kind !== 'pinned' ? items.filter((e) => state.pins.has(e.id)) : [];
+  if (pinned.length) {
+    parts.push(h('section', { 'aria-labelledby': 'pins-title' },
+      h('h2', { id: 'pins-title', class: 'eyebrow' }, 'Đã ghim'),
+      h('ul', { class: 'pin-grid' }, pinned.map(renderPinCard)),
+    ));
+  }
+
+  if (browsing && kind === 'all' && !state.envFilter) {
+    const unnamed = state.entries.filter(isUnnamed).length;
+    const noService = state.entries.filter((e) => !e.corrupt && !(e.service || '').trim()).length;
+    const total = state.entries.filter(needsCleanup).length;
+    if (total) {
+      const reasons = [unnamed ? `${unnamed} mục chưa có tên rõ` : null, noService ? `${noService} mục chưa gắn service` : null].filter(Boolean).join(', ');
+      parts.push(h('section', { class: 'cleanup', 'aria-label': 'Cần dọn dẹp' },
+        h('div', {}, h('strong', {}, `${total} mục khó tìm lại`), h('p', {}, `${reasons}.`)),
+        h('button', { type: 'button', class: 'btn', onclick: () => { state.filter = { kind: 'cleanup', value: null }; renderApp(); } }, 'Xem và sửa'),
+      ));
+    }
+  }
+
+  const envs = ENVS.filter((v) => v && visibleEntries({ ignoreEnv: true }).some((e) => e.env === v));
+  const envButton = (value, label) => h('button', {
+    type: 'button', class: 'pill', 'aria-pressed': state.envFilter === value ? 'true' : 'false',
+    onclick: () => { state.envFilter = value; renderApp(); },
+  }, label);
+  parts.push(h('div', { class: 'content-head' },
+    h('h1', {}, filterLabel(), ' ', h('span', { class: 'count' }, items.length)),
+    envs.length ? h('div', { class: 'pills', role: 'group', 'aria-label': 'Lọc theo môi trường' },
+      envButton('', 'Mọi môi trường'), envs.map((v) => envButton(v, v.toUpperCase()))) : null,
+  ));
+
+  if (!items.length) {
+    parts.push(renderEmpty());
+  } else {
+    const groups = new Map();
+    for (const e of items) {
+      const name = (e.service || '').trim() || NONE;
+      if (!groups.has(name)) groups.set(name, []);
+      groups.get(name).push(e);
+    }
+    const ordered = [...groups].sort(([a], [b]) => (a === NONE) - (b === NONE) || compareVi(a, b));
+    for (const [name, rows] of ordered) {
+      parts.push(h('section', { class: 'card group' },
+        h('h2', { class: 'group-head' }, name === NONE ? 'Chưa gắn service' : name, ' ', h('span', { class: 'count' }, rows.length)),
+        h('ul', { class: 'rows' }, rows.map(renderRow)),
+      ));
+    }
+  }
+  return h('div', { class: 'content' }, parts);
 }
 
 function secretRow(entry, key, label) {
@@ -680,14 +870,17 @@ function plainRow(label, value, link = false) {
   );
 }
 
+function closeDetail() {
+  state.selectedId = null;
+  state.revealed.clear();
+  renderApp();
+}
+
 function renderDetail() {
   const entry = state.entries.find((e) => e.id === state.selectedId);
-  if (!entry) {
-    return h('main', { id: 'main', class: 'detail' }, h('div', { class: 'placeholder' }, 'Chọn một mục để xem chi tiết.'));
-  }
+  if (!entry) return null;
   const project = state.projects.get(entry.projectId);
   const chips = [project?.name, entry.category, entry.service].filter(Boolean).map((t) => h('span', { class: 'chip' }, t));
-  if (entry.env) chips.push(h('span', { class: `chip env-${entry.env}` }, entry.env.toUpperCase()));
   const files = entry.files || [];
   const editor = userName(entry.updatedBy);
   const rows = [
@@ -697,20 +890,20 @@ function renderDetail() {
     secretRow(entry, 'notes', 'Ghi chú'),
   ].filter(Boolean);
   const when = entry.serverUpdatedAt ? new Date(entry.serverUpdatedAt * 1000).toLocaleString('vi-VN') : '';
-  return h('main', { id: 'main', class: 'detail', tabindex: '-1' },
+  return h('aside', { class: 'detail', 'aria-label': 'Chi tiết mục' },
     h('div', { class: 'detail-inner' },
-      h('div', { class: 'detail-head' },
+      h('div', { class: 'detail-top' },
         h('div', {},
-          h('span', { class: 'mobile-only' }, h('button', { type: 'button', class: 'btn btn-ghost', onclick: () => { state.selectedId = null; renderApp(); } }, icon('back'), 'Danh sách')),
           h('h1', {}, entry.title || '(không tên)'),
-          h('div', { class: 'chips' }, h('span', { class: 'chip' }, TYPES[entry.type]?.label || 'Mục'), chips),
+          h('div', { class: 'chips' }, h('span', { class: 'chip' }, TYPES[entry.type]?.label || 'Mục'), chips, envChip(entry.env)),
         ),
-        canEdit(project) ? h('div', { class: 'actions' },
-          entry.corrupt ? null : h('button', { type: 'button', class: 'btn', onclick: () => shareDialog(entry) }, icon('share'), 'Chia sẻ'),
-          entry.corrupt ? null : h('button', { type: 'button', class: 'btn', onclick: () => entryDialog(entry) }, icon('edit'), 'Sửa'),
-          h('button', { type: 'button', class: 'btn btn-danger', onclick: () => deleteEntry(entry) }, icon('trash'), 'Xoá'),
-        ) : null,
+        h('div', { class: 'actions' }, pinButton(entry), iconButton('x', 'Đóng chi tiết', closeDetail)),
       ),
+      canEdit(project) ? h('div', { class: 'actions' },
+        entry.corrupt ? null : h('button', { type: 'button', class: 'btn', onclick: () => shareDialog(entry) }, icon('share'), 'Chia sẻ'),
+        entry.corrupt ? null : h('button', { type: 'button', class: 'btn', onclick: () => entryDialog(entry) }, icon('edit'), 'Sửa'),
+        h('button', { type: 'button', class: 'btn btn-danger', onclick: () => deleteEntry(entry) }, icon('trash'), 'Xoá'),
+      ) : null,
       entry.envContent ? envSection(entry) : null,
       rows.length ? h('dl', { class: 'card' }, rows) : null,
       files.length ? h('section', {},
@@ -725,6 +918,47 @@ function renderDetail() {
       when ? h('p', { class: 'meta' }, `Cập nhật: ${when}${editor ? ` · ${editor}` : ''}`) : null,
     ),
   );
+}
+
+// Search and "add" are one key away; Escape closes the open entry.
+document.addEventListener('keydown', (ev) => {
+  if (!document.querySelector('.shell') || document.querySelector('dialog[open]')) return;
+  const focusSearch = () => {
+    ev.preventDefault();
+    const input = document.querySelector('.search-input');
+    input.focus();
+    input.select();
+  };
+  if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === 'k') return focusSearch();
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(ev.target.tagName) || ev.target.isContentEditable;
+  if (typing || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  if (ev.key === '/') focusSearch();
+  else if (ev.key.toLowerCase() === 'n' && sortedProjects().some(canEdit)) {
+    ev.preventDefault();
+    entryDialog();
+  } else if (ev.key === 'Escape' && state.selectedId) closeDetail();
+});
+
+// Guesses what a pasted secret is so the form can fill itself in.
+function detectPaste(text) {
+  const t = text.trim();
+  if (!t) return null;
+  if (/-----BEGIN [A-Z0-9 ]+-----/.test(t) || /^\{[\s\S]*"(private_key|client_email)"\s*:/.test(t)) {
+    return { type: 'keyfile', message: 'Nhận ra key / service account, đã đưa vào Ghi chú.' };
+  }
+  const vars = envVarCount(t);
+  if (vars >= 2) return { type: 'env', message: `Nhận ra file .env, ${vars} biến.` };
+  const tokens = t.split(/\s+/);
+  const urlIndex = tokens.findIndex((x) => safeUrl(x));
+  if (urlIndex >= 0 && tokens.length >= 2 && tokens.length <= 3) {
+    const rest = tokens.filter((_, i) => i !== urlIndex);
+    return {
+      type: 'login', url: tokens[urlIndex], username: rest.length === 2 ? rest[0] : '', secret: rest[rest.length - 1],
+      message: 'Nhận ra tài khoản, đã điền URL và thông tin đăng nhập.',
+    };
+  }
+  if (tokens.length === 1 && t.length >= 16) return { type: 'apikey', message: 'Nhận ra key / token.' };
+  return { type: 'note', message: 'Đã đưa vào Ghi chú.' };
 }
 
 /* ---------- Entry actions ---------- */
@@ -797,15 +1031,18 @@ function datalist(id, key) {
   return h('datalist', { id }, facetValues(key).filter(([v]) => v !== NONE).map(([v]) => h('option', { value: v })));
 }
 
-function entryDialog(existing) {
+function entryDialog(existing, defaults = {}) {
   const editable = sortedProjects().filter(canEdit);
   const preferred = state.filter.kind === 'project' && canEdit(state.projects.get(state.filter.value)) ? state.filter.value : editable[0]?.id;
-  const e = existing || { type: 'login', projectId: preferred };
+  const e = existing || { type: 'login', projectId: preferred, ...defaults };
   const keptFiles = [...(e.files || [])];
   const removedFiles = [];
   const newFiles = [];
 
-  const title = field('Tên', { required: true, value: e.title, placeholder: 'VD: Google Play service account' });
+  const title = field('Tên', {
+    required: true, value: e.title, placeholder: 'VD: Google Play service account',
+    helper: 'Gợi ý: [Dự án] thứ gì, dùng ở đâu. Sau này gõ vài chữ là ra.',
+  });
   const typeRadios = Object.entries(TYPES).map(([key, t]) => {
     const input = h('input', { type: 'radio', name: 'entry-type', value: key, id: `type-${key}`, checked: key === e.type, onchange: applyType });
     return h('label', { class: 'segment', for: input.id }, input, h('span', { class: 'segment-face' }, icon(t.icon), t.short));
@@ -815,7 +1052,15 @@ function entryDialog(existing) {
     required: true, value: e.projectId, disabled: !!existing,
     options: (existing ? [state.projects.get(e.projectId)] : editable).map((p) => [p.id, p.name]),
   });
-  const env = field('Môi trường', { value: e.env, options: ENVS.map((v) => [v, v ? v.toUpperCase() : 'Không chọn']) });
+  const envRadios = ENVS.map((v) => {
+    const input = h('input', { type: 'radio', name: 'entry-env', value: v, id: `env-${v || 'none'}`, checked: v === (e.env || '') });
+    return h('label', { class: 'segment', for: input.id }, input, h('span', { class: 'segment-face' }, v ? v.toUpperCase() : 'Không'));
+  });
+  const currentEnv = () => envRadios.map((l) => l.querySelector('input')).find((i) => i.checked)?.value ?? (e.env || '');
+  const env = h('fieldset', { class: 'choices' },
+    h('legend', { class: 'form-label' }, 'Môi trường'),
+    h('div', { class: 'segments segments-4' }, envRadios),
+  );
   const category = field('Danh mục', { value: e.category, list: 'dl-category', placeholder: 'VD: Cloud, Database' });
   const service = field('Service', { value: e.service, list: 'dl-service', placeholder: 'VD: AWS, Firebase, MySQL' });
   const username = field('Username', { value: e.username });
@@ -883,6 +1128,70 @@ function entryDialog(existing) {
   drop.addEventListener('drop', (ev) => { ev.preventDefault(); drop.classList.remove('over'); addFiles(ev.dataTransfer.files); });
   renderFiles();
 
+  // New entries start from a paste: the vault works out the type and fills the fields.
+  const setType = (key) => { typeRadios.find((l) => l.querySelector('input').value === key).querySelector('input').checked = true; };
+  const pasteStatus = h('p', { class: 'helper', role: 'status' }, 'Dán .env, token, key, hoặc "URL username mật khẩu". Vault tự nhận loại và điền các ô bên dưới.');
+  const absorbed = (message) => {
+    applyType();
+    pasteStatus.textContent = message;
+    pasteStatus.classList.add('paste-ok');
+    pasteInput.value = '';
+    title.control.focus();
+  };
+  const absorbText = (text, fileName) => {
+    const found = detectPaste(text);
+    if (!found) return;
+    setType(found.type);
+    if (found.type === 'env') {
+      envContent.control.value = text;
+      if (fileName) envName.control.value = fileName;
+    } else if (found.type === 'login') {
+      url.control.value = found.url;
+      username.control.value = found.username;
+      secret.control.value = found.secret;
+    } else if (found.type === 'apikey') {
+      secret.control.value = text.trim();
+    } else {
+      notes.control.value = text;
+    }
+    absorbed(found.message);
+  };
+  const absorbFile = async (file) => {
+    const text = file.size <= MAX_ENV_BYTES ? await file.text() : '';
+    if (text && detectPaste(text)?.type === 'env') return absorbText(text, file.name);
+    setType('keyfile');
+    addFiles([file]);
+    absorbed(`Đã đính kèm ${file.name}.`);
+  };
+  const pasteInput = h('textarea', {
+    id: 'entry-paste', class: 'input paste-input', rows: '3', spellcheck: 'false', placeholder: 'Dán vào đây (⌘V) hoặc kéo thả file…',
+    onpaste: (ev) => {
+      const file = ev.clipboardData.files[0];
+      const text = ev.clipboardData.getData('text');
+      if (!file && !text.trim()) return;
+      ev.preventDefault();
+      if (file) absorbFile(file);
+      else absorbText(text);
+    },
+    onchange: () => { if (pasteInput.value.trim()) absorbText(pasteInput.value); },
+    ondragover: (ev) => ev.preventDefault(),
+    ondrop: (ev) => {
+      if (!ev.dataTransfer.files[0]) return;
+      ev.preventDefault();
+      absorbFile(ev.dataTransfer.files[0]);
+    },
+  });
+  const pasteZone = existing ? null : h('div', { class: 'field paste-zone' },
+    h('label', { for: 'entry-paste' }, 'Dán bí mật vào đây'), pasteInput, pasteStatus);
+
+  // Category and notes are optional, so they stay folded until asked for or filled.
+  let moreOpen = !!(e.category || e.notes);
+  const moreBtn = h('button', { type: 'button', class: 'link-btn', onclick: () => { moreOpen = !moreOpen; applyType(); } });
+  const TITLE_HINTS = {
+    login: 'VD: Jenkins máy build M2', apikey: 'VD: Google Play service account', keyfile: 'VD: App Store Connect API key',
+    env: 'VD: [MJ] ENV React Native', note: 'VD: Quy trình cấp quyền TestFlight',
+  };
+
   url.classList.add('field-wide');
   const credentials = h('div', { class: 'grid-2' }, username, secret, url);
   const filesField = h('div', { class: 'field' }, h('span', { class: 'form-label' }, 'Tệp đính kèm'), drop);
@@ -900,37 +1209,59 @@ function entryDialog(existing) {
     secret.classList.toggle('field-wide', url.hidden && username.hidden);
     envBlock.hidden = !layout.env && !envContent.control.value;
     filesField.hidden = !!layout.env && !keptFiles.length && !newFiles.length;
+    category.hidden = !moreOpen && !category.control.value;
+    notes.hidden = !moreOpen && currentType() !== 'note' && !notes.control.value;
+    moreBtn.textContent = moreOpen ? 'Ẩn bớt' : 'Thêm danh mục, ghi chú';
+    moreBtn.setAttribute('aria-expanded', moreOpen ? 'true' : 'false');
+    title.control.placeholder = TITLE_HINTS[currentType()];
   }
 
+  let addAnother = false;
   const saveBtn = h('button', { type: 'submit', class: 'btn btn-primary', 'data-label': 'Lưu' }, 'Lưu');
+  const saveMoreBtn = existing ? null : h('button', {
+    type: 'button', class: 'btn', onclick: () => { addAnother = true; form.requestSubmit(); },
+  }, 'Lưu & thêm mục khác');
   const form = h('form', { novalidate: true },
     h('div', { class: 'dialog-head' },
       h('h2', { id: 'entry-title' }, existing ? 'Sửa mục' : 'Thêm mục'),
       iconButton('x', 'Đóng', () => dialog.close()),
     ),
     h('div', { class: 'dialog-body entry-form' },
-      title,
+      pasteZone,
       h('fieldset', { class: 'choices' },
         h('legend', { class: 'form-label' }, 'Loại'),
         h('div', { class: 'segments' }, typeRadios),
       ),
-      h('div', { class: 'grid-2' }, project, env),
-      h('div', { class: 'grid-2' }, category, service),
+      title,
+      h('div', { class: 'grid-2' }, project, service),
+      env,
       credentials,
       envBlock,
       filesField,
+      moreBtn,
+      category,
       notes,
       datalist('dl-category', 'category'), datalist('dl-service', 'service'),
     ),
     h('div', { class: 'dialog-foot' },
+      h('span', { class: 'helper foot-hint' }, '⌘↵ để lưu'),
       h('button', { type: 'button', class: 'btn', onclick: () => dialog.close() }, 'Huỷ'),
+      saveMoreBtn,
       saveBtn,
     ),
   );
-  const dialog = h('dialog', { 'aria-labelledby': 'entry-title' }, form);
+  const dialog = h('dialog', { class: 'entry-dialog', 'aria-labelledby': 'entry-title' }, form);
+  form.addEventListener('keydown', (ev) => {
+    if ((ev.metaKey || ev.ctrlKey) && ev.key === 'Enter') {
+      ev.preventDefault();
+      form.requestSubmit();
+    }
+  });
 
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
+    const again = addAnother;
+    addAnother = false;
     title.setError('');
     if (!title.control.value.trim()) return title.setError('Nhập tên cho mục này.'), title.control.focus();
     envContent.setError('');
@@ -951,7 +1282,7 @@ function entryDialog(existing) {
       const entry = {
         title: title.control.value.trim(), type: currentType(),
         category: category.control.value.trim(), service: service.control.value.trim(),
-        env: env.control.value, username: username.control.value.trim(), secret: secret.control.value,
+        env: currentEnv(), username: username.control.value.trim(), secret: secret.control.value,
         url: url.control.value.trim(), notes: notes.control.value,
         envName: envContent.control.value ? envName.control.value.trim() || '.env' : '', envContent: envContent.control.value,
         files: [...keptFiles, ...uploaded],
@@ -961,11 +1292,13 @@ function entryDialog(existing) {
       for (const f of removedFiles) await api(`/api/files/${f.id}`, { method: 'DELETE' }).catch(() => {});
       const saved = { id, projectId: target.id, ...entry, serverUpdatedAt: Math.floor(Date.now() / 1000), updatedBy: state.user.id };
       state.entries = sortEntries([...state.entries.filter((x) => x.id !== id), saved]);
-      state.selectedId = id;
+      state.selectedId = again ? null : id;
       state.revealed.clear();
       dialog.close();
       renderApp();
       toast('Đã lưu.');
+      // Entering a batch: keep the context so only the secret and name change.
+      if (again) entryDialog(null, { type: entry.type, projectId: target.id, env: entry.env, service: entry.service, category: entry.category });
     } catch (err) {
       // Roll back files uploaded for an entry that was never saved.
       for (const f of uploaded) await api(`/api/files/${f.id}`, { method: 'DELETE' }).catch(() => {});
@@ -976,7 +1309,7 @@ function entryDialog(existing) {
 
   applyType();
   openDialog(dialog);
-  title.control.focus();
+  (existing ? title.control : pasteInput).focus();
 }
 
 /* ---------- Projects ---------- */
